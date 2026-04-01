@@ -443,8 +443,9 @@ ct_data <- fread("US Census Tract 2020 Data.csv",
                  header = TRUE,
                  select = c("GEO_ID", "NAME", "DP1_0001C"))
 
-#Remove the first 2 rows (non-census tract data)
-ct_data <- ct_data[!c(1, 2),]
+#Remove any non-census tract header rows if present
+#(The original CMS download had 2 metadata rows; API download may not)
+ct_data <- ct_data[grepl("^1400000US", GEO_ID)]
 
 #Rename columns
 ct_data <- ct_data %>%
