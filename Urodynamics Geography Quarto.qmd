@@ -219,8 +219,10 @@ ggsave(f1, filename = "Boxplot.png",
 
 ```{r}
 #Transform latitude/longitude into acceptable format by usmap
-points_df <- usmap_transform(data = geo_codes_arc,
+points_sf <- usmap_transform(data = geo_codes_arc,
                 input_names = c("long", "lat"))
+coords <- sf::st_coordinates(points_sf)
+points_df <- cbind(as.data.frame(points_sf), x = coords[,1], y = coords[,2])
 
 #Plot!
 f2 <- plot_usmap(data = states_n,
@@ -278,8 +280,10 @@ states_n <- states_n %>%
                    by = c("state_full" = "NAME"))
 
 #Transform latitude/longitude into acceptable format by usmap
-points_df <- usmap_transform(data = geo_codes_arc,
+points_sf <- usmap_transform(data = geo_codes_arc,
                 input_names = c("long", "lat"))
+coords <- sf::st_coordinates(points_sf)
+points_df <- cbind(as.data.frame(points_sf), x = coords[,1], y = coords[,2])
 
 #Add DC data
 states_n[state == "DC",
@@ -412,9 +416,9 @@ ct_matrix <- matrix(ncol = 2, nrow = nrow(gdata),
          )
 
 #Create a matrix containing long/lat of urodynamics centers
-uro_matrix <- matrix(ncol = 2, nrow = nrow(points_df),
-       c(points_df$long,
-         points_df$lat)
+uro_matrix <- matrix(ncol = 2, nrow = nrow(geo_codes_arc),
+       c(geo_codes_arc$long,
+         geo_codes_arc$lat)
          )
 
 #Calculate distance using the Haversine function
