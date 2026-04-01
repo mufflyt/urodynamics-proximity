@@ -1,0 +1,687 @@
+---
+title: "The Geographic Distribution of Urodynamics Testing Centers in the United States"
+subtitle: "An Analysis of Medicare Data"
+format:
+  html:
+    toc: true
+    toc-expand: true
+    toc-location: body
+date: 2026-03-31
+theme: lightly
+author:
+  - name: "Tyler Muffly, MD"
+    affiliations: "Department of Obstetrics and Gynecology"
+embed-resources: true
+toc-title: Contents
+page-layout: full
+code-fold: true
+editor: visual
+editor_options:
+  chunk_output_type: console
+---
+
+# Code Blocks
+
+## Setup data
+
+### Load libraries & functions
+
+```{r}
+packs <- c("readxl", "dplyr", "data.table", "janitor", "doParallel",
+           "stringr", "Hmisc", "tidygeocoder", "tidycensus",
+           "ggplot2", "ggpubr", "ggthemes", "ggbeeswarm",
+           "geosphere", "sf", "usmap")
+lapply(packs, require, character.only = TRUE)
+```
+
+### Import data
+
+Medicare Provider Utilization and Payment Data filtered for urodynamics testing
+CPT codes:
+
+- 51726: Complex cystometrogram (CMG)
+- 51727: CMG with voiding pressure studies
+- 51728: Complex CMG with voiding pressure studies and urethral pressure profile (UPP)
+- 51729: Complex CMG with voiding pressure studies, UPP, and EMG
+- 51741: Complex uroflowmetry (electronic equipment)
+
+To obtain this data:
+1. Go to CMS Medicare Provider Utilization and Payment Data (Physician and Other Practitioners): https://data.cms.gov/provider-summary-by-type-of-service/medicare-physician-other-practitioners/medicare-physician-other-practitioners-by-provider-and-service
+2. Filter by HCPCS codes: 51726, 51727, 51728, 51729, 51741
+3. Download the filtered dataset as "Medicare Urodynamics Data.xlsx"
+
+```{r}
+x <- fread("Medicare_Urodynamics_Data.csv") %>% data.table
+```
+
+### Clean up
+
+#### First round
+
+```{r}
+#Clean column names
+x <- clean_names(x)
+colnames(x) <- colnames(x) %>% str_remove_all("rndrng_|prvdr_")
+
+#Create a column consisting of city and state
+x[, city_state_zip := paste(city, state_abrvtn, zip5, sep = ", ")]
+
+x[, full_original_st := fifelse(
+  is.na(st2), st1, paste(st1, st2, sep = ", ")
+)]
+
+#Clean up the location variable
+x[, st1 := st1 %>%
+    str_replace_all(c("\\bSq\\b"  = "Square",
+                      "\\bAve\\b"  = "Avenue",
+                      "\\bPlz\\b"  = "Plaza",
+                      "\\bRd\\b"  = "Road",
+                      "\\bPkwy\\b"  = "Parkway",
+                      "\\bBlvd\\b"  = "Boulevard",
+                      "\\bBl\\b"  = "Boulevard",
+                      "\\bSte\\b"  = "Street",
+                      "\\bSt\\b"  = "Street",
+                      "\\bFwy\\b"  = "Freeway",
+                      "\\bDr\\b"  = "Drive",
+                      "\\bCir\\b"  = "Circle",
+                      "\\bBldg\\b" = "Building",
+                      "\\bLn\\b" = "Lane",
+                      "\\bHls\\b" = "Hills",
+                      "\\bTrl\\b" = "Trail",
+                      "\\bCtr\\b" = "Center",
+                      "\\bHwy\\b" = "Highway",
+                      "\\bMem\\b" = "Memorial",
+                      "\\." = "",
+                      "," = "",
+                      "-" = "",
+                      "#" = "",
+                      " [0-9+]+$" = "",
+                      "(?i) [a-z+][0-9+]+$" = "",
+                      " .$" = "",
+                      "(?<=[0-9])[a-z]" = "")) %>%
+    str_remove_all("Square|Avenue|Plaza|Road|Boulevard|Street|Drive|Parkway|Freeway|Suite|Circle|Building|Lane|Hills|Trail|Highway|\\b..\\b") %>%
+    str_squish]
+```
+
+#### Coalesce by location
+
+```{r}
+#Create a location variable consisting of street address, city, and state
+x[, address := paste(st1, city, state_abrvtn, zip5, sep = ", ")]
+
+#Coalesce by location
+locs <- x[, .(tot_benes = sum(tot_benes),
+      tot_srvcs = sum(tot_srvcs),
+      avg_mdcr_pymt_amt = mean(avg_mdcr_pymt_amt),
+      city = city %>% first,
+      st = full_original_st %>% first,
+      state = state_abrvtn %>% first,
+      zip5 = zip5 %>% first),
+  by = address]
+
+#Recreate address using original full street name
+locs[, address := paste(st, city, state, zip5, sep = ", ")]
+```
+
+#### Second round
+
+After initial geocoding, manually inspect for duplicate locations with slightly
+different addresses and consolidate them here. Since urodynamics data will have
+different providers than cardiac PET, this section needs to be populated after
+reviewing the actual data.
+
+```{r}
+# NOTE: After downloading and inspecting the urodynamics Medicare data,
+# add manual address corrections here to consolidate duplicate locations.
+# Example format:
+# locs[, address := address %>%
+#        str_replace_all(c(
+#          "old address 1" = "corrected address 1",
+#          "old address 2" = "corrected address 2"
+#        ))]
+```
+
+#### Recoalesce
+
+```{r}
+#Coalesce by location
+locs <- locs[, .(tot_benes = sum(tot_benes),
+      tot_srvcs = sum(tot_srvcs),
+      avg_mdcr_pymt_amt = mean(avg_mdcr_pymt_amt),
+      city = city %>% first,
+      st = st %>% first,
+      state = state %>% first,
+      zip5 = zip5 %>% first),
+  by = address]
+```
+
+### Geocode
+
+```{r}
+#Get geocodes (longitude/latitude)
+geo_codes_arc <- locs %>%
+  geocode(address = address,
+          method = "arcgis",
+          verbose = TRUE)
+
+#Coalesce by state
+states_n <- locs[, .(n = .N), by = state]
+
+#Add states with 0 urodynamics centers
+states_n <- states_n[, state.abb[state.abb %nin% state]] %>%
+  add_row(states_n, state = ., n = 0)
+```
+
+## Plot
+
+### Box plot
+
+```{r}
+f1 <- ggplot(data = locs,
+       aes(y = tot_benes)) +
+  geom_beeswarm(data = locs,
+                alpha = 0.4,
+                size = 6,
+                cex = 4,
+                color = "lightblue3",
+                aes(y = tot_benes, x= 0)) +
+
+  geom_boxplot(outlier.shape = NA,
+               fill =  NA,
+               color = "maroon",
+               linewidth = 2) +
+  scale_y_continuous(trans = "log",
+                     name = "Total number of beneficiaries (patients)",
+                     breaks = c(10, 20, 50,
+                                100, 200, 500,
+                                1000, 2000, 5000,
+                                10000)) +
+  scale_x_continuous(name = NULL, labels = NULL, breaks = NULL) +
+  theme_pubclean() +
+  theme(text = element_text(size = 23, face = "bold"),
+        plot.title=element_text(face = "bold",hjust = 0.0, size = 20),
+        plot.subtitle = element_text(face = "bold", size = 13, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_text(size = 20, face = "bold"),
+        axis.title.x = element_text(size = 25, face = "bold"),
+        axis.title.y = element_text(size = 25, face = "bold"),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        legend.position = "right",
+        legend.key.size = unit(1.25, "cm"))
+
+ggsave(f1, filename = "Boxplot.png",
+       dpi = 600,
+       height = 10, width = 10)
+```
+
+### State-level N
+
+```{r}
+#Transform latitude/longitude into acceptable format by usmap
+points_df <- usmap_transform(data = geo_codes_arc,
+                input_names = c("long", "lat"))
+
+#Plot!
+f2 <- plot_usmap(data = states_n,
+                 values = "n") +
+  scale_fill_gradient_tableau(name = "Number of urodynamics testing centers") +
+  geom_point(data = points_df,
+             aes(x = x, y = y),
+             col = "maroon",
+             alpha = 0.4,
+             size = 5) +
+    ggtitle("State-level availability of urodynamics testing centers") +
+  theme(
+    legend.text = element_text(size = 18, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.background = element_blank(),
+    legend.key = element_blank(),
+    legend.position = c(0.6, 0.001),
+    plot.title=element_text(face = "bold", hjust = 0.5, size = 25),
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.title = element_blank()) +
+  guides(fill = guide_colourbar(direction = "horizontal", title.position = "top",
+                                barwidth = 20, barheight = 3,
+                                ticks.colour = "black", ticks.linewidth = 0,
+                                override.aes = list(size = 12))
+  )
+
+ggsave(filename = "N per state.png",
+       bg = "white",
+       dpi = 600,
+       width = 16,
+       height = 9)
+```
+
+### State-level density (Figure 1A)
+
+```{r}
+#Bind full state names
+states_n <- states_n %>%
+  left_join(data.frame(state_full = state.name,
+                       state_abb = state.abb),
+                   by = c("state" = "state_abb"))
+
+#Get US pop size
+state_pop <- get_decennial(geography = "state",
+                           year = 2020,
+                           variables = "P1_001N")
+
+#Join
+states_n <- states_n %>%
+  left_join(state_pop %>%
+              select(NAME, value) %>%
+              rename(pop = value),
+                   by = c("state_full" = "NAME"))
+
+#Transform latitude/longitude into acceptable format by usmap
+points_df <- usmap_transform(data = geo_codes_arc,
+                input_names = c("long", "lat"))
+
+#Add DC data
+states_n[state == "DC",
+         `:=`(state_full = "District of Columbia",
+              pop = 689545)]
+
+#Add urodynamics density column
+states_n[, uro_density := 1000000*(n/pop)]
+
+#Arrange state by density
+states_n[, state := factor(state, states_n %>% arrange(-uro_density) %>% pull(state))]
+
+#Plot!
+f1a <- plot_usmap(data = states_n,
+                 values = "uro_density") +
+    geom_point(data = points_df,
+             aes(x = x, y = y),
+             col = "grey20",
+             alpha = 0.4,
+             size = 3) +
+  scale_fill_distiller(palette = "RdYlBu", direction = +1,
+                       name = "Number of urodynamics testing centers per million") +
+    ggtitle(waiver()) +
+  theme(
+    legend.text = element_text(size = 18, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.background = element_blank(),
+    legend.key = element_blank(),
+    legend.position = c(0.6, 0.001),
+    plot.title=element_text(face = "bold", hjust = 0.5, size = 25),
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.title = element_blank()) +
+  guides(fill = guide_colourbar(direction = "horizontal", title.position = "top",
+                                barwidth = 20, barheight = 3,
+                                ticks.colour = "black", ticks.linewidth = 0,
+                                override.aes = list(size = 12))
+  ) +
+  force_panelsizes(rows = unit(9, "in"),
+                   cols = unit(16, "in"))
+
+ggsave(filename = "Figure 1A.png",
+       bg = "white",
+       dpi = 1000,
+       width = 16,
+       height = 9)
+```
+
+### Intersection of points with rural/urban areas
+
+```{r}
+#Read rural-urban classification data
+rudata <- sf::read_sf("RU Data/tl_2021_us_cbsa.shp")
+
+#Rename long/lat columns
+rudata <- rudata %>%
+  rename(lon = INTPTLON, lat = INTPTLAT) %>%
+  mutate(across(.cols = c("lon", "lat"), ~ as.numeric(.))) %>%
+  clean_names %>%
+  filter(lsad == "M1")
+
+#Convert the object returned by tidygeocode into an sf object
+geo_uro_points <- geo_codes_arc %>%
+  st_as_sf(coords = c("long", "lat"))
+
+#Create matching CRS
+st_crs(geo_uro_points) <- "WGS84"
+geo_uro_points <- st_transform(geo_uro_points, crs = "NAD83")
+
+#Get N of intersections
+ints <- st_intersects(rudata, geo_uro_points)
+
+#Sum them up
+metro <- lapply(1:length(ints),
+       function(i) length(ints[[i]]) > 0) %>%
+  unlist %>%
+  factor %>%
+  summary
+
+#Convert to data.table
+rudata <- rudata %>% data.table
+
+#Confirm in another way
+for(i in 1:rudata[,.N]) {
+
+  any_present <- which(locs$city %in% rudata[i, name %>%
+           word(1, sep = ",") %>%
+           str_split("-") %>%
+           unlist])
+
+  if(length(any_present > 0)) {
+  same_state <- locs$state[any_present] %in% rudata[i, name %>%
+           word(2, sep = ",") %>%
+           str_split("-") %>%
+           unlist %>% str_trim]
+  }
+
+  if(length(any_present > 0) & any(same_state) ) {
+    rudata[i, present := TRUE]
+  } else {
+    rudata[i, present := FALSE]
+  }
+
+}
+
+#Compare estimates
+rudata[, present %>% summary]
+metro
+```
+
+### Census block-based map
+
+#### Prepare data
+
+```{r}
+#Import census tract data
+gdata <- sf::st_read(dsn = "tlgdb_2021_a_us_substategeo.gdb",
+                  layer = "Census_Tract")
+
+#Rename long/lat columns
+gdata <- gdata %>%
+  rename(lon = INTPTLON, lat = INTPTLAT) %>%
+  mutate(across(.cols = c("lon", "lat"), ~ as.numeric(.)))
+
+#Create a matrix containing long/lat of census tracts
+ct_matrix <- matrix(ncol = 2, nrow = nrow(gdata),
+       c(gdata$lon,
+         gdata$lat)
+         )
+
+#Create a matrix containing long/lat of urodynamics centers
+uro_matrix <- matrix(ncol = 2, nrow = nrow(points_df),
+       c(points_df$long,
+         points_df$lat)
+         )
+
+#Calculate distance using the Haversine function
+distances <- distm(x = uro_matrix, y = ct_matrix,
+                   fun = geosphere::distHaversine)
+
+#Create an empty min_distances vessel
+min_distances <- as.numeric()
+
+#Fill up the vessel with the distance between each census tract and the nearest urodynamics center
+for(i in 1:nrow(ct_matrix)) {
+ min_distances <- c(min_distances, distances[, i] %>% min)
+}
+
+#Convert to km
+min_distances <- (min_distances/1000)
+
+#Remove redundant object
+rm(distances)
+
+#Attach
+gdata$dist <- min_distances
+
+#Import census tract file
+ct_data <- fread("US Census Tract 2020 Data.csv",
+                 header = TRUE,
+                 select = c("GEO_ID", "NAME", "DP1_0001C"))
+
+#Remove the first 2 rows (non-census tract data)
+ct_data <- ct_data[!c(1, 2),]
+
+#Rename columns
+ct_data <- ct_data %>%
+  rename(any_of(.q(pop = DP1_0001C,
+                   GEOID = GEO_ID)))
+
+#Extract state names
+ct_data[, state := fifelse(NAME %>% str_detect(";"),
+                           word(NAME, -1, sep = "; "),
+                           word(NAME, -1, sep = ", "))]
+
+#Format GEOID similar to how it is in gdata
+ct_data[, GEOID := GEOID %>% str_remove("1400000US")]
+
+#Merge together
+gdata <- merge(gdata,
+               ct_data,
+               by = "GEOID")
+
+#Remove ct_data
+rm(ct_data)
+
+#Make population numeric
+gdata <- gdata %>%
+  mutate(pop = pop %>% as.numeric)
+```
+
+#### Plot map (Figure 1B)
+
+##### Minus PR/HW/AK
+
+```{r}
+f1b <- ggplot(data = gdata %>%
+               filter(state %nin% c("Hawaii", "Alaska", "Puerto Rico")),
+             aes(fill = cut(dist,
+                            c(0, 5, 10, 25, 50, 100, 200, 500, 1000, 100000)),
+                  color = after_scale(fill))) +
+  geom_sf(color = NA, linewidth = 0) +
+  scale_fill_brewer(palette = "RdYlBu", direction = -1,
+                    name = "Distance (kilometres)",
+                    labels = c("Less than 5",
+                               "5 to 10",
+                               "10 to 25",
+                               "25 to 50",
+                               "50 to 100",
+                               "100 to 200",
+                               "200 to 500",
+                               "500 or greater")) +
+    ggtitle(waiver()) +
+  theme(
+    legend.text = element_text(size = 18, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.background = element_blank(),
+    legend.key = element_blank(),
+    legend.position = c(0.9, 0.25),
+    plot.title=element_text(face = "bold", hjust = 0.5, size = 25),
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),
+    axis.title = element_blank())
+```
+
+##### Puerto Rico
+
+```{r}
+pr <- ggplot(data = gdata %>%
+               filter(state %in% c("Puerto Rico")),
+             aes(fill = cut(dist,
+                            c(0, 5, 10, 25, 50, 100, 200, 500, 1000, 100000)),
+                  color = after_scale(fill))) +
+  geom_sf(color = NA, linewidth = 0) +
+  scale_fill_brewer(palette = "RdYlBu", direction = -1,
+                    name = "Distance (kilometres)",
+                    labels = c("Less than 5",
+                               "5 to 10",
+                               "10 to 25",
+                               "25 to 50",
+                               "50 to 100",
+                               "100 to 200",
+                               "200 to 500",
+                               "500 or greater")) +
+    theme(
+    legend.text = element_text(size = 18, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.background = element_blank(),
+    legend.key = element_blank(),
+    legend.position = "none",
+    plot.title=element_text(face = "bold", hjust = 0.5, size = 25),
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    axis.title = element_blank()) +
+  coord_sf(xlim = c(-68.5, -64.5),
+           ylim = c(17.8, 18.8)) +
+  force_panelsizes(rows = unit(0.5, "in"),
+                   cols = unit(0.8, "in"))
+```
+
+##### Hawaii
+
+```{r}
+hw <- ggplot(data = gdata %>%
+               filter(state %in% c("Hawaii")),
+             aes(fill = cut(dist,
+                            c(0, 5, 10, 25, 50, 100, 200, 500, 1000, 100000)),
+                  color = after_scale(fill))) +
+  geom_sf(color = NA, linewidth = 0) +
+  scale_fill_brewer(palette = "RdYlBu", direction = -1,
+                    name = "Distance (kilometres)",
+                    labels = c("Less than 5",
+                               "5 to 10",
+                               "10 to 25",
+                               "25 to 50",
+                               "50 to 100",
+                               "100 to 200",
+                               "200 to 500",
+                               "500 or greater")) +
+    theme(
+    legend.text = element_text(size = 18, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.background = element_blank(),
+    legend.key = element_blank(),
+    legend.position = "none",
+    plot.title=element_text(face = "bold", hjust = 0.5, size = 25),
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    axis.title = element_blank()) +
+  coord_sf(xlim = c(-180, -150),
+           ylim = c(18, 30)) +
+  force_panelsizes(rows = unit(2, "in"),
+                   cols = unit(3.2, "in"))
+```
+
+##### AK
+
+```{r}
+ak <- ggplot(data = gdata %>%
+               filter(state %in% c("Alaska")),
+             aes(fill = cut(dist,
+                            c(0, 5, 10, 25, 50, 100, 200, 500, 1000, 100000)),
+                  color = after_scale(fill))) +
+  geom_sf(color = NA, linewidth = 0) +
+  scale_fill_brewer(palette = "RdYlBu", direction = -1,
+                    name = "Distance (kilometres)",
+                    labels = c("Less than 5",
+                               "5 to 10",
+                               "10 to 25",
+                               "25 to 50",
+                               "50 to 100",
+                               "100 to 200",
+                               "200 to 500",
+                               "500 or greater")) +
+    theme(
+    legend.text = element_text(size = 18, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.background = element_blank(),
+    legend.key = element_blank(),
+    legend.position = "none",
+    plot.title=element_text(face = "bold", hjust = 0.5, size = 25),
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    axis.title = element_blank()) +
+  coord_sf(xlim = c(-180, -130),
+           ylim = c (51, 72)) +
+  force_panelsizes(rows = unit(2, "in"),
+                   cols = unit(3.2, "in"))
+```
+
+##### Merge
+
+```{r}
+#Merge with Alaska
+f1b <- f1b + inset_element(ak,
+                            left = 0, right = 0.3, top = 0.3, bottom = 0)
+
+#Merge with Hawaii
+f1b <- f1b + inset_element(hw,
+                            left = 0.2, right = 0.4, top = 0.3, bottom = 0)
+
+#Merge with Puerto Rico
+f1b <- f1b + inset_element(pr,
+                            left = 0.75, right = 0.85, top = 0.1, bottom = 0)
+
+#Save plot!
+ggsave(filename = "Figure 1B.png",
+       dpi = 1000,
+       width = 16,
+       height = 9)
+```
+
+#### Get relevant numbers
+
+```{r}
+##N
+#Total number of unique urodynamics testing centers
+locs[, uniqueN(address)]
+
+#By State
+states_n %>% arrange(-n)
+
+#States with no urodynamics
+states_n[n == 0]
+
+##Density
+states_n %>%
+  arrange(-uro_density) %>%
+  mutate(uro_density = round(uro_density, 1))
+
+##Median distance
+#Remove geom
+gdata <- gdata %>%
+  select(pop, state, dist) %>%
+  data.table
+
+#Calculated weighted median distance
+gdata[, wtd.quantile(dist, pop, probs = c(0.25, 0.5, 0.75))
+      %>% round(1)]
+
+##N and % of US citizens more than 100km from a urodynamics testing center
+round(gdata[dist > 100, pop %>% sum]/1000000, 1) #N (in millions)
+round(100*gdata[dist > 100, pop %>% sum]/gdata[, pop %>% sum], 1) #Percentage
+
+#Nearest by state
+gdata[,
+      .(mdist = wtd.quantile(dist, pop, probs = 0.5) %>% round(0)),
+      by = state] %>% arrange(-mdist)
+
+#N of metropolitan statistical areas with a urodynamics testing center
+metro
+round(100*metro[1]/sum(metro[1:2]), 1)
+```
