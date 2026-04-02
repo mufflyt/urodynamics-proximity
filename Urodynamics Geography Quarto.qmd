@@ -30,8 +30,46 @@ editor_options:
 packs <- c("readxl", "dplyr", "data.table", "janitor", "doParallel",
            "stringr", "Hmisc", "tidygeocoder", "tidycensus",
            "ggplot2", "ggpubr", "ggthemes", "ggbeeswarm",
-           "geosphere", "sf", "usmap")
+           "geosphere", "sf", "usmap", "patchwork")
 lapply(packs, require, character.only = TRUE)
+
+female_population_var <- "B01001_026"
+female_population_year <- 2023
+miles_per_meter <- 0.000621371
+distance_breaks_miles <- c(0, 5, 10, 25, 50, 100, 200, 500, 1000, 100000)
+
+load_cached_or_fetch_female_population <- function(geography, cache_path = NULL) {
+  if (!is.null(cache_path) && file.exists(cache_path)) {
+    return(fread(cache_path) %>% as.data.table())
+  }
+
+  if (identical(geography, "tract")) {
+    female_pop <- rbindlist(lapply(c(state.abb, "DC", "PR"), function(state_code) {
+      get_acs(
+        geography = "tract",
+        state = state_code,
+        year = female_population_year,
+        survey = "acs5",
+        variables = female_population_var
+      ) %>%
+        as.data.table()
+    }), fill = TRUE)
+  } else {
+    female_pop <- get_acs(
+      geography = geography,
+      year = female_population_year,
+      survey = "acs5",
+      variables = female_population_var
+    ) %>%
+      as.data.table()
+  }
+
+  if (!is.null(cache_path)) {
+    fwrite(female_pop, cache_path)
+  }
+
+  female_pop
+}
 ```
 
 ### Import data
@@ -263,20 +301,18 @@ ggsave(filename = "N per state.png",
 ```{r}
 #Bind full state names
 states_n <- states_n %>%
-  left_join(data.frame(state_full = state.name,
-                       state_abb = state.abb),
+  left_join(data.frame(state_full = c(state.name, "District of Columbia", "Puerto Rico"),
+                       state_abb = c(state.abb, "DC", "PR")),
                    by = c("state" = "state_abb"))
 
-#Get US pop size
-state_pop <- get_decennial(geography = "state",
-                           year = 2020,
-                           variables = "P1_001N")
+#Get state female population size
+state_pop <- load_cached_or_fetch_female_population("state")
 
 #Join
 states_n <- states_n %>%
   left_join(state_pop %>%
-              select(NAME, value) %>%
-              rename(pop = value),
+              select(NAME, estimate) %>%
+              rename(pop = estimate),
                    by = c("state_full" = "NAME"))
 
 #Transform latitude/longitude into acceptable format by usmap
@@ -284,11 +320,6 @@ points_sf <- usmap_transform(data = geo_codes_arc,
                 input_names = c("long", "lat"))
 coords <- sf::st_coordinates(points_sf)
 points_df <- cbind(as.data.frame(points_sf), x = coords[,1], y = coords[,2])
-
-#Add DC data
-states_n[state == "DC",
-         `:=`(state_full = "District of Columbia",
-              pop = 689545)]
 
 #Add urodynamics density column
 states_n[, uro_density := 1000000*(n/pop)]
@@ -299,13 +330,13 @@ states_n[, state := factor(state, states_n %>% arrange(-uro_density) %>% pull(st
 #Plot!
 f1a <- plot_usmap(data = states_n,
                  values = "uro_density") +
-    geom_point(data = points_df,
+  geom_point(data = points_df,
              aes(x = x, y = y),
              col = "grey20",
              alpha = 0.4,
              size = 3) +
   scale_fill_distiller(palette = "RdYlBu", direction = +1,
-                       name = "Number of urodynamics testing centers per million") +
+                       name = "Number of urodynamics testing centers per million women") +
     ggtitle(waiver()) +
   theme(
     legend.text = element_text(size = 18, face = "bold"),
@@ -433,8 +464,8 @@ for(i in 1:nrow(ct_matrix)) {
  min_distances <- c(min_distances, distances[, i] %>% min)
 }
 
-#Convert to km
-min_distances <- (min_distances/1000)
+#Convert to miles
+min_distances <- (min_distances * miles_per_meter)
 
 #Remove redundant object
 rm(distances)
@@ -442,27 +473,17 @@ rm(distances)
 #Attach
 gdata$dist <- min_distances
 
-#Import census tract file
-ct_data <- fread("US Census Tract 2020 Data.csv",
-                 header = TRUE,
-                 select = c("GEO_ID", "NAME", "DP1_0001C"))
-
-#Remove any non-census tract header rows if present
-#(The original CMS download had 2 metadata rows; API download may not)
-ct_data <- ct_data[grepl("^1400000US", GEO_ID)]
-
-#Rename columns
-ct_data <- ct_data %>%
-  rename(any_of(.q(pop = DP1_0001C,
-                   GEOID = GEO_ID)))
+#Import census tract female population file
+ct_data <- load_cached_or_fetch_female_population(
+  "tract",
+  "ACS 2023 5-year Female Tract Population.csv"
+) %>%
+  rename(pop = estimate)
 
 #Extract state names
 ct_data[, state := fifelse(NAME %>% str_detect(";"),
                            word(NAME, -1, sep = "; "),
                            word(NAME, -1, sep = ", "))]
-
-#Format GEOID similar to how it is in gdata
-ct_data[, GEOID := GEOID %>% str_remove("1400000US")]
 
 #Merge together
 gdata <- merge(gdata,
@@ -484,12 +505,11 @@ gdata <- gdata %>%
 ```{r}
 f1b <- ggplot(data = gdata %>%
                filter(state %nin% c("Hawaii", "Alaska", "Puerto Rico")),
-             aes(fill = cut(dist,
-                            c(0, 5, 10, 25, 50, 100, 200, 500, 1000, 100000)),
+             aes(fill = cut(dist, distance_breaks_miles),
                   color = after_scale(fill))) +
   geom_sf(color = NA, linewidth = 0) +
   scale_fill_brewer(palette = "RdYlBu", direction = -1,
-                    name = "Distance (kilometres)",
+                    name = "Distance (miles)",
                     labels = c("Less than 5",
                                "5 to 10",
                                "10 to 25",
@@ -518,12 +538,11 @@ f1b <- ggplot(data = gdata %>%
 ```{r}
 pr <- ggplot(data = gdata %>%
                filter(state %in% c("Puerto Rico")),
-             aes(fill = cut(dist,
-                            c(0, 5, 10, 25, 50, 100, 200, 500, 1000, 100000)),
+             aes(fill = cut(dist, distance_breaks_miles),
                   color = after_scale(fill))) +
   geom_sf(color = NA, linewidth = 0) +
   scale_fill_brewer(palette = "RdYlBu", direction = -1,
-                    name = "Distance (kilometres)",
+                    name = "Distance (miles)",
                     labels = c("Less than 5",
                                "5 to 10",
                                "10 to 25",
@@ -556,12 +575,11 @@ pr <- ggplot(data = gdata %>%
 ```{r}
 hw <- ggplot(data = gdata %>%
                filter(state %in% c("Hawaii")),
-             aes(fill = cut(dist,
-                            c(0, 5, 10, 25, 50, 100, 200, 500, 1000, 100000)),
+             aes(fill = cut(dist, distance_breaks_miles),
                   color = after_scale(fill))) +
   geom_sf(color = NA, linewidth = 0) +
   scale_fill_brewer(palette = "RdYlBu", direction = -1,
-                    name = "Distance (kilometres)",
+                    name = "Distance (miles)",
                     labels = c("Less than 5",
                                "5 to 10",
                                "10 to 25",
@@ -594,12 +612,11 @@ hw <- ggplot(data = gdata %>%
 ```{r}
 ak <- ggplot(data = gdata %>%
                filter(state %in% c("Alaska")),
-             aes(fill = cut(dist,
-                            c(0, 5, 10, 25, 50, 100, 200, 500, 1000, 100000)),
+             aes(fill = cut(dist, distance_breaks_miles),
                   color = after_scale(fill))) +
   geom_sf(color = NA, linewidth = 0) +
   scale_fill_brewer(palette = "RdYlBu", direction = -1,
-                    name = "Distance (kilometres)",
+                    name = "Distance (miles)",
                     labels = c("Less than 5",
                                "5 to 10",
                                "10 to 25",
@@ -673,11 +690,11 @@ gdata <- gdata %>%
   select(pop, state, dist) %>%
   data.table
 
-#Calculated weighted median distance
+#Calculated weighted median distance for women
 gdata[, wtd.quantile(dist, pop, probs = c(0.25, 0.5, 0.75))
       %>% round(1)]
 
-##N and % of US citizens more than 100km from a urodynamics testing center
+##N and % of women more than 100 miles from a urodynamics testing center
 round(gdata[dist > 100, pop %>% sum]/1000000, 1) #N (in millions)
 round(100*gdata[dist > 100, pop %>% sum]/gdata[, pop %>% sum], 1) #Percentage
 
