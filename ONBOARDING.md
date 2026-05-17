@@ -196,13 +196,15 @@ The first run takes 30–60 minutes (mostly geocoding + ACS pulls). Subsequent r
 
 ---
 
-## 10. Target journals (suggestion order)
+## 10. Target journal
 
+**Primary target: *Urogynecology* (the AUGS journal, formerly *Female Pelvic Medicine & Reconstructive Surgery*).** This is the right audience — the readers are the clinicians who order UDS, the urogynecologists who perform it, and the FPMRS/URPS community most affected by the access gap this paper documents. Format the manuscript to *Urogynecology* author guidelines from the outset.
+
+Backup options if rejected:
 1. *Urology* or *The Journal of Urology* — direct topical fit.
-2. *Female Pelvic Medicine & Reconstructive Surgery* / *Urogynecology* (the AUGS journal) — best audience fit.
-3. *Obstetrics & Gynecology ("Green Journal")* — broader gyn audience.
-4. *American Journal of Obstetrics & Gynecology* — if you want a higher-impact swing.
-5. *Health Affairs* / *JAMA Network Open* — if you reframe as a health-access piece.
+2. *Obstetrics & Gynecology* ("Green Journal") — broader gyn audience.
+3. *American Journal of Obstetrics & Gynecology* — higher-impact swing.
+4. *Health Affairs* / *JAMA Network Open* — if reframed as a health-access piece.
 
 ---
 
